@@ -3091,6 +3091,321 @@ describe("emitGraphQLResolver search filter DSL", () => {
 		);
 	});
 
+	function attributeProjection() {
+		return makeProjection({
+			name: "InstrumentSearchDoc",
+			fields: [
+				makeField({
+					name: "attributeTerms",
+					keyword: true,
+					filterables: ["terms_all"],
+					type: {
+						kind: "Model",
+						name: "Array",
+						indexer: { value: { kind: "String" } },
+					} as unknown as Type,
+				}),
+				makeField({
+					name: "attributes",
+					nested: true,
+					subProjection: makeSubProjection("AttributeSearchDoc", [
+						makeField({
+							name: "attributeKey",
+							keyword: true,
+							filterables: ["term", "term_negate"],
+						}),
+						makeField({
+							name: "number",
+							filterables: ["range"],
+							type: { kind: "Scalar", name: "float64" } as unknown as Type,
+						}),
+						makeField({ name: "label", filterables: ["match"] }),
+					]),
+					type: {
+						kind: "Model",
+						name: "Array",
+						indexer: { value: { kind: "Model" } },
+					} as unknown as Type,
+				}),
+			],
+		});
+	}
+
+	async function attributeBuildQuery() {
+		return loadBuildQuery(
+			prepareFunctionContent(
+				await emitGraphQLResolver(attributeProjection(), defaultOptions),
+			),
+		);
+	}
+
+	const strikeClause = { term: { "attributes.attributeKey": "strike" } };
+	const numberClause = { range: { "attributes.number": { gte: 50 } } };
+	const nestedFilter = (bool: unknown) => ({
+		nested: { path: "attributes", query: { bool } },
+	});
+
+	it("buildQuery keeps one nested query per clause for a single nested filter object", async () => {
+		const buildQuery = await attributeBuildQuery();
+		assert.deepEqual(
+			buildQuery(undefined, undefined, {
+				attributes: { attributeKey: "strike", numberGte: 50 },
+			}),
+			{
+				bool: {
+					filter: [
+						nestedFilter({ filter: [strikeClause] }),
+						nestedFilter({ filter: [numberClause] }),
+					],
+				},
+			},
+		);
+	});
+
+	it("buildQuery matches every clause of an All entry against one nested element", async () => {
+		const buildQuery = await attributeBuildQuery();
+		assert.deepEqual(
+			buildQuery(undefined, undefined, {
+				attributesAll: [{ attributeKey: "strike", numberGte: 50 }],
+			}),
+			{
+				bool: {
+					filter: [nestedFilter({ filter: [strikeClause, numberClause] })],
+				},
+			},
+		);
+	});
+
+	it("buildQuery ANDs one grouped nested query per All entry", async () => {
+		const buildQuery = await attributeBuildQuery();
+		const tenor = nestedFilter({
+			filter: [{ term: { "attributes.attributeKey": "tenor" } }],
+		});
+		assert.deepEqual(
+			buildQuery(undefined, undefined, {
+				attributesAll: [
+					{ attributeKey: "strike", numberGte: 50 },
+					{ attributeKey: "tenor" },
+				],
+			}),
+			{
+				bool: {
+					filter: [
+						tenor,
+						nestedFilter({ filter: [strikeClause, numberClause] }),
+					],
+				},
+			},
+		);
+	});
+
+	it("buildQuery puts a negation in an All entry into the group's must_not", async () => {
+		const buildQuery = await attributeBuildQuery();
+		assert.deepEqual(
+			buildQuery(undefined, undefined, {
+				attributesAll: [{ attributeKeyNot: "strike", numberGte: 50 }],
+			}),
+			{
+				bool: {
+					filter: [
+						nestedFilter({ filter: [numberClause], must_not: [strikeClause] }),
+					],
+				},
+			},
+		);
+	});
+
+	it("buildQuery requires an element matching none of the negations for a negation-only All entry", async () => {
+		const buildQuery = await attributeBuildQuery();
+		assert.deepEqual(
+			buildQuery(undefined, undefined, {
+				attributesAll: [{ attributeKeyNot: "strike" }],
+			}),
+			{ bool: { filter: [nestedFilter({ must_not: [strikeClause] })] } },
+		);
+		assert.deepEqual(
+			buildQuery(undefined, undefined, {
+				attributes: { attributeKeyNot: "strike" },
+			}),
+			{ bool: { must_not: [nestedFilter({ filter: [strikeClause] })] } },
+		);
+	});
+
+	it("buildQuery scores an All entry holding a match in bool.must", async () => {
+		const buildQuery = await attributeBuildQuery();
+		assert.deepEqual(
+			buildQuery(undefined, undefined, {
+				attributesAll: [{ attributeKey: "strike", labelMatch: "call" }],
+			}),
+			{
+				bool: {
+					must: [
+						{
+							nested: {
+								path: "attributes",
+								score_mode: "max",
+								query: {
+									bool: {
+										must: [{ match: { "attributes.label": "call" } }],
+										filter: [strikeClause],
+									},
+								},
+							},
+						},
+					],
+				},
+			},
+		);
+	});
+
+	it("buildQuery combines a single nested object with All entries", async () => {
+		const buildQuery = await attributeBuildQuery();
+		const tenor = { term: { "attributes.attributeKey": "tenor" } };
+		assert.deepEqual(
+			buildQuery(undefined, undefined, {
+				attributes: { attributeKey: "strike", numberGte: 50 },
+				attributesAll: [{ attributeKey: "tenor" }],
+			}),
+			{
+				bool: {
+					filter: [
+						nestedFilter({ filter: [tenor] }),
+						nestedFilter({ filter: [strikeClause] }),
+						nestedFilter({ filter: [numberClause] }),
+					],
+				},
+			},
+		);
+	});
+
+	it("buildQuery groups an All entry inside an All entry of an outer @nested field", async () => {
+		const projection = makeProjection({
+			name: "InstrumentSearchDoc",
+			fields: [
+				makeField({
+					name: "legs",
+					nested: true,
+					subProjection: makeSubProjection("LegSearchDoc", [
+						makeField({
+							name: "side",
+							keyword: true,
+							filterables: ["term"],
+						}),
+						makeField({
+							name: "attributes",
+							nested: true,
+							subProjection: makeSubProjection("AttributeSearchDoc", [
+								makeField({
+									name: "attributeKey",
+									keyword: true,
+									filterables: ["term"],
+								}),
+								makeField({
+									name: "number",
+									filterables: ["range"],
+									type: { kind: "Scalar", name: "float64" } as unknown as Type,
+								}),
+							]),
+							type: {
+								kind: "Model",
+								name: "Array",
+								indexer: { value: { kind: "Model" } },
+							} as unknown as Type,
+						}),
+					]),
+					type: {
+						kind: "Model",
+						name: "Array",
+						indexer: { value: { kind: "Model" } },
+					} as unknown as Type,
+				}),
+			],
+		});
+		const buildQuery = loadBuildQuery(
+			prepareFunctionContent(
+				await emitGraphQLResolver(projection, defaultOptions),
+			),
+		);
+		assert.deepEqual(
+			buildQuery(undefined, undefined, {
+				legsAll: [
+					{
+						side: "buy",
+						attributesAll: [{ attributeKey: "strike", numberGte: 50 }],
+					},
+				],
+			}),
+			{
+				bool: {
+					filter: [
+						{
+							nested: {
+								path: "legs",
+								query: {
+									bool: {
+										filter: [
+											{ term: { "legs.side": "buy" } },
+											{
+												nested: {
+													path: "legs.attributes",
+													query: {
+														bool: {
+															filter: [
+																{
+																	term: {
+																		"legs.attributes.attributeKey": "strike",
+																	},
+																},
+																{
+																	range: {
+																		"legs.attributes.number": { gte: 50 },
+																	},
+																},
+															],
+														},
+													},
+												},
+											},
+										],
+									},
+								},
+							},
+						},
+					],
+				},
+			},
+		);
+	});
+
+	it("buildQuery skips an empty All entry", async () => {
+		const buildQuery = await attributeBuildQuery();
+		assert.deepEqual(
+			buildQuery(undefined, undefined, { attributesAll: [{}] }),
+			{ match_all: {} },
+		);
+	});
+
+	it("buildQuery requires every value of a terms_all filter", async () => {
+		const buildQuery = await attributeBuildQuery();
+		assert.deepEqual(
+			buildQuery(undefined, undefined, {
+				attributeTermsAll: ["region=nl", "tenor=m1"],
+			}),
+			{
+				bool: {
+					filter: [
+						{ term: { attributeTerms: "region=nl" } },
+						{ term: { attributeTerms: "tenor=m1" } },
+					],
+				},
+			},
+		);
+		assert.deepEqual(
+			buildQuery(undefined, undefined, { attributeTermsAll: [] }),
+			{ match_all: {} },
+		);
+	});
+
 	// Issue #110: a SearchFilter input that traverses two levels of nested
 	// struct (e.g. `locations.address.country` on a counterparty projection,
 	// where `locations` is @nested and `address` is a non-@nested struct

@@ -688,6 +688,38 @@ describe("decorators", () => {
 		]);
 	});
 
+	it("stores the terms_all @filterable kind on an array of strings", async () => {
+		const runner = await createRunner();
+		const diagnostics = await runner.diagnose(`
+      model Product {
+        @filterable("terms_all") @keyword @searchable labels: string[];
+      }
+    `);
+
+		assert.equal(diagnostics.length, 0);
+		const labels = runner.program
+			.getGlobalNamespaceType()
+			.models.get("Product")
+			?.properties.get("labels");
+		assert.ok(labels);
+		assert.deepEqual(getFilterableKinds(runner.program, labels), ["terms_all"]);
+	});
+
+	it("rejects terms_all on an array of models", async () => {
+		const runner = await createRunner();
+		const diagnostics = await runner.diagnose(`
+      model Tag {
+        @searchable name: string;
+      }
+      model Product {
+        @filterable("terms_all") @nested @searchable tags: Tag[];
+      }
+    `);
+
+		const codes = diagnostics.map((x) => x.code);
+		assert.equal(hasDiagnosticCode(codes, "terms-all-on-model-array"), true);
+	});
+
 	it("returns undefined when @filterable not used", async () => {
 		const runner = await createRunner();
 		const diagnostics = await runner.diagnose(`

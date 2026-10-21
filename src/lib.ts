@@ -171,7 +171,20 @@ export const $lib = createTypeSpecLibrary({
 		"invalid-filterable-kind": {
 			severity: "error",
 			messages: {
-				default: paramMessage`Decorator @filterable received unsupported kind "${"kind"}". Allowed kinds: term, term_negate, terms, exists, range, prefix, match.`,
+				default: paramMessage`Decorator @filterable received unsupported kind "${"kind"}". Allowed kinds: term, term_negate, terms, terms_all, exists, range, prefix, match.`,
+			},
+		},
+		"terms-all-on-model-array": {
+			severity: "error",
+			messages: {
+				default:
+					'Decorator @filterable("terms_all") applies to a scalar or an array of scalars, not to an array of models. Mark the array @nested instead: its "<field>All" input then takes a list of sub-filters.',
+			},
+		},
+		"searchfilter-input-name-collision": {
+			severity: "error",
+			messages: {
+				default: paramMessage`Two filter inputs on "${"typeName"}" are both named "${"inputName"}". A "<field>All" input generated for a @nested array or a terms_all filter takes the name of another filter input. Rename one of the fields.`,
 			},
 		},
 		"filterable-requires-kind": {
@@ -316,7 +329,7 @@ export const $lib = createTypeSpecLibrary({
 		},
 		filterable: {
 			description:
-				"Declare filter kinds (term, term_negate, terms, exists, range, prefix, match)",
+				"Declare filter kinds (term, term_negate, terms, terms_all, exists, range, prefix, match)",
 		},
 		searchInfer: {
 			description:

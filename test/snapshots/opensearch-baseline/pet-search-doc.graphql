@@ -44,6 +44,8 @@ input PetSearchFilter {
   createdAtGt: String
   createdAtLt: String
   tags: TagSearchFilter
+  tagsAll: [TagSearchFilter!]
+  aliasesAll: [String!]
   nicknameExists: Boolean
   rankGte: Int
   rankLte: Int

@@ -863,6 +863,7 @@ export const FILTERABLE_KINDS = [
 	"term",
 	"term_negate",
 	"terms",
+	"terms_all",
 	"exists",
 	"range",
 	// Analyzed-field kinds (issue #130). Unlike term/terms/range these target
@@ -898,6 +899,13 @@ export function $filterable(
 			reportDiagnostic(context.program, {
 				code: "invalid-filterable-kind",
 				format: { kind },
+				target: context.getArgumentTarget(index) ?? target,
+			});
+			return;
+		}
+		if (kind === "terms_all" && isArrayOfModelType(target.type)) {
+			reportDiagnostic(context.program, {
+				code: "terms-all-on-model-array",
 				target: context.getArgumentTarget(index) ?? target,
 			});
 			return;

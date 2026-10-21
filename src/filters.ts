@@ -16,6 +16,7 @@ export interface FilterableEntry {
 	 *  - term: <field>
 	 *  - term_negate: <field>Not
 	 *  - terms: <field>In
+	 *  - terms_all: <field>All
 	 *  - exists: <field>Exists
 	 *  - range: <field>Gte / <field>Lte / <field>Gt / <field>Lt (one entry per bound)
 	 *  - prefix: <field>Prefix
@@ -146,6 +147,8 @@ function filterInputFieldName(
 			return `${projectedName}Not`;
 		case "terms":
 			return `${projectedName}In`;
+		case "terms_all":
+			return `${projectedName}All`;
 		case "exists":
 			return `${projectedName}Exists`;
 		case "prefix":

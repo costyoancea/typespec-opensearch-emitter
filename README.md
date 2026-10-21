@@ -268,7 +268,7 @@ In this example:
 | `@indexSettings(json)` | `Model` (projection) | Embeds index settings (e.g. analysis config) in the mapping output. Value must be valid JSON. | See example below. |
 | `@searchAs("name")` | `ModelProperty` | Renames the field in mapping and TypeScript output. Can be set on source or projection (projection wins). | `@searchAs("firstName") givenName: string;` |
 | `@aggregatable(...kinds)` / `@aggregatable(kind, options)` | `ModelProperty` | Declares OpenSearch aggregations on the GraphQL connection. Allowed kinds: `"terms"`, `"cardinality"`, `"missing"`, `"sum"`, `"avg"`, `"min"`, `"max"`, `"date_histogram"`, `"range"`. Multi-arg form emits all listed string kinds. The single-kind-with-options form is required for `"date_histogram"`, `"range"`, and `"terms"`-with-sub or `"terms"`-with-`topHits`. `topHits: N` adds a `top_hits: { size: N }` sub-agg so each bucket carries up to N matching docs. `size: N` sets how many buckets the `terms` aggregation returns, overriding [`graphql.terms-buckets`](#emitter-options). `"date_histogram"` takes an optional `bounds: #{ min?, max? }` that pins its range and with it the declared interval; without bounds the emitter caps the bucket count instead — see [Bounding a `date_histogram`](#bounding-a-date_histogram). See [Aggregations](#aggregations-aggregatable). | `@aggregatable("terms", "cardinality") locations: Location[];` / `@aggregatable("terms", #{ topHits: 5 }) tagId: string;` / `@aggregatable("date_histogram", #{ interval: "month", bounds: #{ min: "now-5y", max: "now" } }) validTo: utcDateTime;` |
-| `@filterable(...kinds)` | `ModelProperty` | Declares filter inputs on the GraphQL `<Type>SearchFilter` input. Allowed kinds: `"term"`, `"term_negate"`, `"terms"`, `"exists"`, `"range"`, `"prefix"`, `"match"`. `"terms"` produces a `<field>In: [Type!]` multi-value input (chip-style filters). On a `@nested` array field, `"exists"` becomes a path-level nested-existence check. `"prefix"` (`<field>Prefix: String`, OpenSearch `prefix`) and `"match"` (`<field>Match: String`, OpenSearch `match`) query the **analyzed** field rather than the `.keyword` sub-field, so an `@analyzer` (e.g. edge-ngram) registered on the field is exercised by the query — this is how partial / begins-with / contains matching is expressed. `"match"` runs in scoring context (`bool.must`), so a closer match ranks first under the default `_score` sort. | `@filterable("term", "terms") status: string;` / `@analyzer("edge_ngram") @filterable("prefix", "match") name: string;` |
+| `@filterable(...kinds)` | `ModelProperty` | Declares filter inputs on the GraphQL `<Type>SearchFilter` input. Allowed kinds: `"term"`, `"term_negate"`, `"terms"`, `"terms_all"`, `"exists"`, `"range"`, `"prefix"`, `"match"`. `"terms"` produces a `<field>In: [Type!]` multi-value input (chip-style filters) that matches any of the values. `"terms_all"` produces a `<field>All: [Type!]` input that requires every value: one `term` filter per value, all in `bool.filter`, so `labelsAll: ["a", "b"]` matches a document whose `labels` array holds both. It applies to a scalar or an array of scalars; on a single-valued scalar, two or more values match nothing. On an array of models it reports `terms-all-on-model-array`, because a `@nested` field already takes a `<field>All` list (see [Filtering a `@nested` array](#filtering-a-nested-array)). Under `@searchInfer` an explicit `@filterable` replaces the inferred kinds, so list `"terms"` alongside it to keep `<field>In`. On a `@nested` array field, `"exists"` becomes a path-level nested-existence check. `"prefix"` (`<field>Prefix: String`, OpenSearch `prefix`) and `"match"` (`<field>Match: String`, OpenSearch `match`) query the **analyzed** field rather than the `.keyword` sub-field, so an `@analyzer` (e.g. edge-ngram) registered on the field is exercised by the query — this is how partial / begins-with / contains matching is expressed. `"match"` runs in scoring context (`bool.must`), so a closer match ranks first under the default `_score` sort. | `@filterable("term", "terms") status: string;` / `@keyword @filterable("terms", "terms_all") labels: string[];` / `@analyzer("edge_ngram") @filterable("prefix", "match") name: string;` |
 | `@searchInfer` | `Model` (projection) | Walks the source model's fields and applies type-driven default `@filterable` / `@aggregatable` / `@sortable` capabilities (see [Inference](#searchinfer-type-driven-defaults)). Explicit decorators on a field always win on their axis. | `@searchInfer model TradeSearchDoc is SearchProjection<Trade> {}` |
 | `@searchSkip` | `ModelProperty` | Opts a field out of `@searchInfer` inference. The field is still included in response shape if `@searchable` / `@nested` apply; without those, the field is excluded entirely. | `@searchable @searchSkip auditTrail: string;` |
 | `@resolvableBy(Model.key)` / `@resolvableBy(Model.key, "index")` | `Model` | Declares how a row of the model is fetched for a cross-domain join: the key it is read by, and the index that discovers many rows by that key. See [Cross-domain view joins](#cross-domain-view-joins). | `@resolvableBy(OwnershipRecord.petId, "byPetId")` |
@@ -295,10 +295,50 @@ Stacking `@filterable` and `@aggregatable` per field becomes noisy on a typical 
 
 When a field's type is a TypeSpec model (struct) — either inline (`address: Address`) or as an array (`tags: Tag[]`) — `@searchInfer` recurses into the nested model's properties and applies the same inference table. The parent's `<Type>SearchFilter` exposes `<fieldName>: <NestedType>SearchFilter`, and a separate `<NestedType>SearchFilter` input is emitted alongside.
 
-- **`@nested` array** (OS-nested mapping): filter clauses wrap in `bool.filter[ nested + inner ]`. Free-text search wraps the same way — see [Free-text search across nested fields](#free-text-search-across-nested-fields).
+- **`@nested` array** (OS-nested mapping): each clause of the `<field>` filter object wraps in its own `nested` query; each entry of `<field>All` wraps in one — see [Filtering a `@nested` array](#filtering-a-nested-array). Free-text search wraps in `nested` too — see [Free-text search across nested fields](#free-text-search-across-nested-fields).
 - **Inline struct** (no `@nested`): children carry dotted OS field paths (`address.country`) — no nested wrapper, on either the filter or the free-text axis.
 - **Recursion depth**: unbounded; cycles are guarded by a visited-name set.
 - **Opt-out**: `@searchSkip` on the parent's field suppresses the virtual sub-projection (and the parent skips the field when no other decorator keeps it in the projection).
+
+### Filtering a `@nested` array
+
+A `@nested` array field adds two inputs to the parent `<Type>SearchFilter`:
+
+```graphql
+input InstrumentSearchFilter {
+  attributes: AttributeSearchFilter
+  attributesAll: [AttributeSearchFilter!]
+}
+```
+
+**`<field>` matches each condition independently against any element.** Every clause of the object gets its own `nested` query, so different elements can satisfy different clauses. `attributes: { attributeKey: "strike", numberGte: 50 }` emits two queries, and a document with the elements `{ attributeKey: "strike", number: 20 }` and `{ attributeKey: "contractSize", number: 1000 }` matches:
+
+```json
+[
+  { "nested": { "path": "attributes", "query": { "bool": { "filter": [{ "term": { "attributes.attributeKey": "strike" } }] } } } },
+  { "nested": { "path": "attributes", "query": { "bool": { "filter": [{ "range": { "attributes.number": { "gte": 50 } } }] } } } }
+]
+```
+
+A negation in the object (`<field>Not`, `<field>Exists: false`) goes to the parent `bool.must_not`, one `nested` query per clause: `attributes: { attributeKeyNot: "strike" }` excludes every document with a `strike` element.
+
+**`<field>All` matches each entry against one element.** All clauses of an entry run inside one `nested` query, and the document must match every entry, each through an element of its own. `attributesAll: [{ attributeKey: "strike", numberGte: 50 }]` emits one query, so the document above does not match:
+
+```json
+{ "nested": { "path": "attributes", "query": { "bool": { "filter": [
+  { "term": { "attributes.attributeKey": "strike" } },
+  { "range": { "attributes.number": { "gte": 50 } } }
+] } } } }
+```
+
+Inside an entry:
+
+- A negation joins the group as `must_not`. `{ attributeKeyNot: "strike", numberGte: 50 }` needs an element with a number of at least 50 whose key is not `strike`.
+- An entry holding only negations needs an element that matches none of them. `{ attributeKeyNot: "strike" }` emits `nested(bool.must_not: [strike])` in the parent `bool.filter`: some element is not `strike`. To exclude documents with a `strike` element, use the single object instead.
+- A `match` clause scores the group: the `nested` query goes into the parent `bool.must` with `score_mode: "max"`, its filters and negations in the same bool.
+- An empty entry adds nothing.
+
+With positive clauses only, one entry per clause matches like the single object: `attributesAll: [{ attributeKey: "strike" }, { numberGte: 50 }]` equals `attributes: { attributeKey: "strike", numberGte: 50 }`. A negation differs: the object excludes every document with a matching element, while an entry needs one element that does not match. `attributes` and `attributesAll` combine: the object's per-clause queries and the entries' grouped queries all land in the parent bool.
 
 ### Override semantics
 
@@ -712,17 +752,17 @@ Emitted code must also stay in the APPSYNC_JS supported subset. `src/emit-graphq
 
 #### Guards
 
-Three tests in `src/emit-graphql-resolver.test.ts` assert every emitted file stays under 32,768 bytes. Measured after the per-request bucket budget (issue #155):
+Three tests in `src/emit-graphql-resolver.test.ts` assert every emitted file stays under 32,768 bytes. Measured after the `<field>All` nested list and `terms_all`, which added 746 bytes to every prepare function:
 
 | Projection | Resolver | Prepare | Search | Headroom |
 | --- | --- | --- | --- | --- |
-| counterparty shape (7 nested sub-models) | 8,991 | 24,754 | 742 | 8,014 |
-| counterparty shape, 2 searchable text fields per sub-model | 8,491 | 24,617 | 742 | 8,151 |
-| synthetic wide (14 sub-models) | 14,458 | 32,452 | 732 | **316** |
+| counterparty shape (7 nested sub-models) | 14,464 | 23,612 | 742 | 9,156 |
+| counterparty shape, 2 searchable text fields per sub-model | 14,029 | 23,647 | 742 | 9,121 |
+| synthetic wide (14 sub-models) | 24,211 | 31,440 | 732 | **1,328** |
 
-`prepare` is the constrained file in all three, and headroom depends on projection width. The 14-sub-model guard governs: at 316 bytes, the next change touching the prepare function hits the cap. Real projections are not close — the counterparty shape renders 18,319 bytes as a single file and stays monolithic.
+`prepare` is the constrained file in all three, and headroom depends on projection width. The 14-sub-model guard governs at 1,328 bytes. Real projections are not close — the counterparty shape renders 18,319 bytes as a single file and stays monolithic.
 
-Nested free-text search (issue #158) costs ~53 bytes per `@nested` sub-model carrying searchable text (it scales with path length), plus 166 bytes once for the `NQ` helper. It is charged only to projections that have such a field. The 14-sub-model guard is the shape where that matters: its sub-models are all `@keyword`/date, so it pays nothing, but adding searchable text to every sub-model of a projection that wide would exceed the cap — as the 316-byte headroom already implies for any addition.
+Nested free-text search (issue #158) costs ~53 bytes per `@nested` sub-model carrying searchable text (it scales with path length), plus 166 bytes once for the `NQ` helper. It is charged only to projections that have such a field. The 14-sub-model guard is the shape where that matters: its sub-models are all `@keyword`/date, so it pays nothing, but adding searchable text to every sub-model of a projection that wide would exceed the cap.
 
 CI goes red on the guard, and AppSync refuses the deploy. The assertion message prints the current headroom — trust it over these numbers.
 

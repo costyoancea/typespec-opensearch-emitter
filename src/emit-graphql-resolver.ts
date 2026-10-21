@@ -156,6 +156,8 @@ const AUTO_DATE_HISTOGRAM_HELPER = "ADH";
  */
 const NESTED_TEXT_QUERY_HELPER = "NQ";
 
+const NESTED_WRAP_HELPER = "NW";
+
 // Bound for the runtime applyFilterSpec walker's fixed-size work slot pool.
 // APPSYNC_JS does not honor self-extending Array iteration, so the emitted
 // function pre-allocates this many slots as a literal. Set well above any
@@ -1264,9 +1266,18 @@ function renderBuildSortFunction(): string {
  * See FILTER_SPEC/stringifyNode for the compact node encoding this walks,
  * and issues #99, #101, #105, #110 for why the walk uses fixed-size slot
  * pools instead of recursion or growable arrays (APPSYNC_JS constraints).
+ *
+ * Finalize pops a stack, so sibling nested clauses land in the parent bool in
+ * reverse enqueue order: the last `<field>All` entry comes first. Order inside
+ * a bool carries no meaning for OpenSearch, so the walk does not reverse it.
  */
 function renderApplyFilterSpecFunction(slotsLiteral: string): string {
-	return `function applyFilterSpec(rootSpec, rootInput, rootOutMusts, rootOutFilters, rootOutMustNots) {
+	return `function ${NESTED_WRAP_HELPER}(path, b) {
+	if (b.must) return { nested: { path, score_mode: "max", query: { bool: b } } };
+	return { nested: { path, query: { bool: b } } };
+}
+
+function applyFilterSpec(rootSpec, rootInput, rootOutMusts, rootOutFilters, rootOutMustNots) {
 	if (!rootSpec || !rootInput) return;
 
 	const procSlots = ${slotsLiteral};
@@ -1295,44 +1306,49 @@ function renderApplyFilterSpecFunction(slotsLiteral: string): string {
 			for (const node of spec) {
 				const value = input[node.i];
 				if (node.k === "nested") {
-					if (value != null) {
-						const childMusts = [];
-						const childFilters = [];
-						const childMustNots = [];
-						if (procTail + 1 > procSlots.length) {
-							util.error(
-								"applyFilterSpec exceeded fixed work-slot capacity; SearchFilter shape too deep for APPSYNC_JS function",
-							);
+					let entry = 0;
+					for (const group of [value].concat(input[node.i + "All"] || [])) {
+						entry = entry + 1;
+						if (group != null) {
+							const childMusts = [];
+							const childFilters = [];
+							const childMustNots = [];
+							if (procTail + 1 > procSlots.length) {
+								util.error(
+									"applyFilterSpec exceeded fixed work-slot capacity; SearchFilter too deep, or a <field>All list too long, for APPSYNC_JS function",
+								);
+							}
+							if (finTail + 1 > finSlots.length) {
+								util.error(
+									"applyFilterSpec exceeded fixed finalize-slot capacity; SearchFilter too deep, or a <field>All list too long, for APPSYNC_JS function",
+								);
+							}
+							procSlots[procTail] = {
+								spec: node.c,
+								input: group,
+								outMusts: childMusts,
+								outFilters: childFilters,
+								outMustNots: childMustNots,
+							};
+							procTail = procTail + 1;
+							finSlots[finTail] = {
+								path: node.p,
+								grouped: entry > 1,
+								childMusts,
+								childFilters,
+								childMustNots,
+								parentMusts: outMusts,
+								parentFilters: outFilters,
+								parentMustNots: outMustNots,
+							};
+							finTail = finTail + 1;
 						}
-						if (finTail + 1 > finSlots.length) {
-							util.error(
-								"applyFilterSpec exceeded fixed finalize-slot capacity; SearchFilter shape too deep for APPSYNC_JS function",
-							);
-						}
-						procSlots[procTail] = {
-							spec: node.c,
-							input: value,
-							outMusts: childMusts,
-							outFilters: childFilters,
-							outMustNots: childMustNots,
-						};
-						procTail = procTail + 1;
-						finSlots[finTail] = {
-							path: node.p,
-							childMusts,
-							childFilters,
-							childMustNots,
-							parentMusts: outMusts,
-							parentFilters: outFilters,
-							parentMustNots: outMustNots,
-						};
-						finTail = finTail + 1;
 					}
 				} else if (node.k === "object") {
 					if (value != null) {
 						if (procTail + 1 > procSlots.length) {
 							util.error(
-								"applyFilterSpec exceeded fixed work-slot capacity; SearchFilter shape too deep for APPSYNC_JS function",
+								"applyFilterSpec exceeded fixed work-slot capacity; SearchFilter too deep, or a <field>All list too long, for APPSYNC_JS function",
 							);
 						}
 						procSlots[procTail] = {
@@ -1355,6 +1371,10 @@ function renderApplyFilterSpecFunction(slotsLiteral: string): string {
 				} else if (node.k === "terms") {
 					if (value != null && value.length > 0) {
 						outFilters.push({ terms: { [node.f]: value } });
+					}
+				} else if (node.k === "terms_all") {
+					for (const term of value || []) {
+						outFilters.push({ term: { [node.f]: term } });
 					}
 				} else if (node.k === "exists") {
 					if (value != null) {
@@ -1415,30 +1435,27 @@ function renderApplyFilterSpecFunction(slotsLiteral: string): string {
 		if (finTail > 0) {
 			finTail = finTail - 1;
 			const item = finSlots[finTail];
-			for (const clause of item.childMusts) {
-				item.parentMusts.push({
-					nested: {
-						path: item.path,
-						score_mode: "max",
-						query: { bool: { must: [clause] } },
-					},
-				});
-			}
-			for (const clause of item.childFilters) {
-				item.parentFilters.push({
-					nested: {
-						path: item.path,
-						query: { bool: { filter: [clause] } },
-					},
-				});
-			}
-			for (const clause of item.childMustNots) {
-				item.parentMustNots.push({
-					nested: {
-						path: item.path,
-						query: { bool: { filter: [clause] } },
-					},
-				});
+			const path = item.path;
+			if (item.grouped) {
+				const b = {};
+				if (item.childMusts.length > 0) b.must = item.childMusts;
+				if (item.childFilters.length > 0) b.filter = item.childFilters;
+				if (item.childMustNots.length > 0) b.must_not = item.childMustNots;
+				if (b.must) {
+					item.parentMusts.push(${NESTED_WRAP_HELPER}(path, b));
+				} else if (b.filter || b.must_not) {
+					item.parentFilters.push(${NESTED_WRAP_HELPER}(path, b));
+				}
+			} else {
+				for (const c of item.childMusts) {
+					item.parentMusts.push(${NESTED_WRAP_HELPER}(path, { must: [c] }));
+				}
+				for (const c of item.childFilters) {
+					item.parentFilters.push(${NESTED_WRAP_HELPER}(path, { filter: [c] }));
+				}
+				for (const c of item.childMustNots) {
+					item.parentMustNots.push(${NESTED_WRAP_HELPER}(path, { filter: [c] }));
+				}
 			}
 		}
 	}

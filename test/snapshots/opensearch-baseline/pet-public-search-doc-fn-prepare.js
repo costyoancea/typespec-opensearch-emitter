@@ -1,6 +1,6 @@
 import { util } from "@aws-appsync/utils";
 
-const FILTER_SPEC = [{i:"species",k:"term",f:"species"}, {i:"speciesNot",k:"term_negate",f:"species"}, {i:"birthDate",k:"range",f:"birthDate"}, {i:"createdAt",k:"range",f:"createdAt"}, {i:"nicknameExists",k:"exists",f:"nickname.keyword"}, {i:"rank",k:"range",f:"rank"}];
+const FILTER_SPEC = [{i:"species",k:"term",f:"species"}, {i:"speciesNot",k:"term_negate",f:"species"}, {i:"birthDate",k:"range",f:"birthDate"}, {i:"createdAt",k:"range",f:"createdAt"}, {i:"aliasesAll",k:"terms_all",f:"aliases.keyword"}, {i:"nicknameExists",k:"exists",f:"nickname.keyword"}, {i:"rank",k:"range",f:"rank"}];
 
 const AGG_SPEC = [{n:"bySpecies",a:{ terms: { field: "species", size: 10 } }}, {n:"byBreedGroup",a:{ terms: { field: "breedGroup", size: 50 }, aggs: { "topRank": { max: { field: "rank" } } } }}, {n:"byAlias",a:{ terms: { field: "aliases.keyword", size: 10 } }}, {n:"uniqueAliasCount",a:{ cardinality: { field: "aliases.keyword" } }}, {n:"missingNicknameCount",a:{ missing: { field: "nickname.keyword" } }}];
 
@@ -136,6 +136,11 @@ function buildSort(sortBy) {
 	return out;
 }
 
+function NW(path, b) {
+	if (b.must) return { nested: { path, score_mode: "max", query: { bool: b } } };
+	return { nested: { path, query: { bool: b } } };
+}
+
 function applyFilterSpec(rootSpec, rootInput, rootOutMusts, rootOutFilters, rootOutMustNots) {
 	if (!rootSpec || !rootInput) return;
 
@@ -165,44 +170,49 @@ function applyFilterSpec(rootSpec, rootInput, rootOutMusts, rootOutFilters, root
 			for (const node of spec) {
 				const value = input[node.i];
 				if (node.k === "nested") {
-					if (value != null) {
-						const childMusts = [];
-						const childFilters = [];
-						const childMustNots = [];
-						if (procTail + 1 > procSlots.length) {
-							util.error(
-								"applyFilterSpec exceeded fixed work-slot capacity; SearchFilter shape too deep for APPSYNC_JS function",
-							);
+					let entry = 0;
+					for (const group of [value].concat(input[node.i + "All"] || [])) {
+						entry = entry + 1;
+						if (group != null) {
+							const childMusts = [];
+							const childFilters = [];
+							const childMustNots = [];
+							if (procTail + 1 > procSlots.length) {
+								util.error(
+									"applyFilterSpec exceeded fixed work-slot capacity; SearchFilter too deep, or a <field>All list too long, for APPSYNC_JS function",
+								);
+							}
+							if (finTail + 1 > finSlots.length) {
+								util.error(
+									"applyFilterSpec exceeded fixed finalize-slot capacity; SearchFilter too deep, or a <field>All list too long, for APPSYNC_JS function",
+								);
+							}
+							procSlots[procTail] = {
+								spec: node.c,
+								input: group,
+								outMusts: childMusts,
+								outFilters: childFilters,
+								outMustNots: childMustNots,
+							};
+							procTail = procTail + 1;
+							finSlots[finTail] = {
+								path: node.p,
+								grouped: entry > 1,
+								childMusts,
+								childFilters,
+								childMustNots,
+								parentMusts: outMusts,
+								parentFilters: outFilters,
+								parentMustNots: outMustNots,
+							};
+							finTail = finTail + 1;
 						}
-						if (finTail + 1 > finSlots.length) {
-							util.error(
-								"applyFilterSpec exceeded fixed finalize-slot capacity; SearchFilter shape too deep for APPSYNC_JS function",
-							);
-						}
-						procSlots[procTail] = {
-							spec: node.c,
-							input: value,
-							outMusts: childMusts,
-							outFilters: childFilters,
-							outMustNots: childMustNots,
-						};
-						procTail = procTail + 1;
-						finSlots[finTail] = {
-							path: node.p,
-							childMusts,
-							childFilters,
-							childMustNots,
-							parentMusts: outMusts,
-							parentFilters: outFilters,
-							parentMustNots: outMustNots,
-						};
-						finTail = finTail + 1;
 					}
 				} else if (node.k === "object") {
 					if (value != null) {
 						if (procTail + 1 > procSlots.length) {
 							util.error(
-								"applyFilterSpec exceeded fixed work-slot capacity; SearchFilter shape too deep for APPSYNC_JS function",
+								"applyFilterSpec exceeded fixed work-slot capacity; SearchFilter too deep, or a <field>All list too long, for APPSYNC_JS function",
 							);
 						}
 						procSlots[procTail] = {
@@ -225,6 +235,10 @@ function applyFilterSpec(rootSpec, rootInput, rootOutMusts, rootOutFilters, root
 				} else if (node.k === "terms") {
 					if (value != null && value.length > 0) {
 						outFilters.push({ terms: { [node.f]: value } });
+					}
+				} else if (node.k === "terms_all") {
+					for (const term of value || []) {
+						outFilters.push({ term: { [node.f]: term } });
 					}
 				} else if (node.k === "exists") {
 					if (value != null) {
@@ -285,30 +299,27 @@ function applyFilterSpec(rootSpec, rootInput, rootOutMusts, rootOutFilters, root
 		if (finTail > 0) {
 			finTail = finTail - 1;
 			const item = finSlots[finTail];
-			for (const clause of item.childMusts) {
-				item.parentMusts.push({
-					nested: {
-						path: item.path,
-						score_mode: "max",
-						query: { bool: { must: [clause] } },
-					},
-				});
-			}
-			for (const clause of item.childFilters) {
-				item.parentFilters.push({
-					nested: {
-						path: item.path,
-						query: { bool: { filter: [clause] } },
-					},
-				});
-			}
-			for (const clause of item.childMustNots) {
-				item.parentMustNots.push({
-					nested: {
-						path: item.path,
-						query: { bool: { filter: [clause] } },
-					},
-				});
+			const path = item.path;
+			if (item.grouped) {
+				const b = {};
+				if (item.childMusts.length > 0) b.must = item.childMusts;
+				if (item.childFilters.length > 0) b.filter = item.childFilters;
+				if (item.childMustNots.length > 0) b.must_not = item.childMustNots;
+				if (b.must) {
+					item.parentMusts.push(NW(path, b));
+				} else if (b.filter || b.must_not) {
+					item.parentFilters.push(NW(path, b));
+				}
+			} else {
+				for (const c of item.childMusts) {
+					item.parentMusts.push(NW(path, { must: [c] }));
+				}
+				for (const c of item.childFilters) {
+					item.parentFilters.push(NW(path, { filter: [c] }));
+				}
+				for (const c of item.childMustNots) {
+					item.parentMustNots.push(NW(path, { filter: [c] }));
+				}
 			}
 		}
 	}

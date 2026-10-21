@@ -402,7 +402,10 @@ function renderSearchFilterShapeRecursive(
 	out: string[],
 	emitted: Map<string, string>,
 ): void {
-	const block = renderSearchFilterInputBlock(program, shape);
+	const { block, duplicateNames } = renderSearchFilterInputBlock(
+		program,
+		shape,
+	);
 	const prior = emitted.get(shape.typeName);
 	if (prior !== undefined) {
 		// Same rendered block ⇒ same shape via two paths (#103): dedup silently
@@ -417,6 +420,13 @@ function renderSearchFilterShapeRecursive(
 		}
 		return;
 	}
+	for (const inputName of duplicateNames) {
+		reportDiagnostic(program, {
+			code: "searchfilter-input-name-collision",
+			format: { typeName: shape.typeName, inputName },
+			target: shape.target ?? NoTarget,
+		});
+	}
 	emitted.set(shape.typeName, block);
 	out.push(block);
 	for (const sub of shape.nestedShapes) {
@@ -427,41 +437,60 @@ function renderSearchFilterShapeRecursive(
 function renderSearchFilterInputBlock(
 	program: Program,
 	shape: SearchFilterShape,
-): string {
-	const fieldLines = shape.nodes.map((node) =>
+): { block: string; duplicateNames: string[] } {
+	const seen = new Set<string>();
+	const duplicateNames: string[] = [];
+	const fieldLines: string[] = [];
+	for (const [name, type] of shape.nodes.flatMap((node) =>
 		renderSearchFilterField(program, node),
-	);
-	return `input ${shape.typeName} {\n${fieldLines.join("\n")}\n}`;
+	)) {
+		if (seen.has(name)) {
+			duplicateNames.push(name);
+			continue;
+		}
+		seen.add(name);
+		fieldLines.push(`  ${name}: ${type}`);
+	}
+	return {
+		block: `input ${shape.typeName} {\n${fieldLines.join("\n")}\n}`,
+		duplicateNames,
+	};
 }
 
 function renderSearchFilterField(
 	program: Program,
 	node: FilterSpecNode,
-): string {
-	if (node.kind === "nested" || node.kind === "object") {
-		return `  ${node.inputName}: ${node.nestedTypeName ?? "String"}`;
+): [string, string][] {
+	if (node.kind === "nested") {
+		return [
+			[node.inputName, `${node.nestedTypeName}`],
+			[`${node.inputName}All`, `[${node.nestedTypeName}!]`],
+		];
+	}
+	if (node.kind === "object") {
+		return [[node.inputName, node.nestedTypeName ?? "String"]];
 	}
 	if (node.kind === "exists" || node.kind === "nested_exists") {
-		return `  ${node.inputName}: Boolean`;
+		return [[node.inputName, "Boolean"]];
 	}
 	const gqlType = node.sourceField
 		? toGraphQLType(program, node.sourceField.type, node.sourceField, "filter")
 		: "String";
 	const baseScalar = stripListWrap(gqlType);
-	if (node.kind === "terms") {
-		return `  ${node.inputName}: [${baseScalar}!]`;
+	if (node.kind === "terms" || node.kind === "terms_all") {
+		return [[node.inputName, `[${baseScalar}!]`]];
 	}
 	if (node.kind === "range") {
 		// FILTER_SPEC carries one entry per range field; SDL still renders
 		// four bound inputs (issue #101).
 		return [
-			`  ${node.inputName}Gte: ${baseScalar}`,
-			`  ${node.inputName}Lte: ${baseScalar}`,
-			`  ${node.inputName}Gt: ${baseScalar}`,
-			`  ${node.inputName}Lt: ${baseScalar}`,
-		].join("\n");
+			[`${node.inputName}Gte`, baseScalar],
+			[`${node.inputName}Lte`, baseScalar],
+			[`${node.inputName}Gt`, baseScalar],
+			[`${node.inputName}Lt`, baseScalar],
+		];
 	}
-	return `  ${node.inputName}: ${baseScalar}`;
+	return [[node.inputName, baseScalar]];
 }
 
 /**

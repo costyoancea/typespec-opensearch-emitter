@@ -57,6 +57,7 @@ input PetPublicSearchFilter {
   createdAtLte: String
   createdAtGt: String
   createdAtLt: String
+  aliasesAll: [String!]
   nicknameExists: Boolean
   rankGte: Int
   rankLte: Int

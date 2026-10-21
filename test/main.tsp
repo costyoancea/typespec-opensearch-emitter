@@ -42,7 +42,7 @@ model Pet {
 	@searchable @filterable("range") createdAt: utcDateTime;
 	@searchable @nested tags: Tag[];
 	@searchable owner: Owner;
-	@searchable @aggregatable("terms", "cardinality") aliases: string[];
+	@searchable @aggregatable("terms", "cardinality") @filterable("terms_all") aliases: string[];
 	// Issue #166 — array of an enum. The doc type must parenthesize the member
 	// union before appending `[]`.
 	@searchable categories: PetCategory[];
