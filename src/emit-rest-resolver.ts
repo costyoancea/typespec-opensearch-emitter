@@ -97,11 +97,15 @@ function renderBaseHeaders(injectHeaders?: Record<string, string>): string {
 
 /**
  * `params.query` is a string→string map (AppSync HTTP data source reference),
- * so it cannot hold a repeated key. An exploded array parameter therefore has
- * to be serialized into the resourcePath's own query string instead.
+ * so it cannot hold a repeated key, and it carries an unset value as a string
+ * the backend may reject. An exploded array or an optional parameter is
+ * therefore serialized into the resourcePath's own query string instead,
+ * where an unset value drops out.
  */
 function needsQueryString(op: RestOperationShape): boolean {
-	return op.queryParams.some((param) => param.array && param.explode);
+	return op.queryParams.some(
+		(param) => param.optional || (param.array && param.explode),
+	);
 }
 
 function queryValueExpression(param: RestQueryParam): string {

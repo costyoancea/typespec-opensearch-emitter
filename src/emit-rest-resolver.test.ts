@@ -37,6 +37,13 @@ const listPets: RestOperationShape = {
 	],
 };
 
+const listPetsByRequiredStatus: RestOperationShape = {
+	...listPets,
+	queryParams: [
+		{ name: "status", optional: false, array: false, explode: true },
+	],
+};
+
 const listPetsByStatuses: RestOperationShape = {
 	...listPets,
 	queryParams: [
@@ -94,10 +101,17 @@ describe("emitRestResolver request rendering", () => {
 		assert.ok(content.includes("body: JSON.stringify(ctx.args.input)"));
 	});
 
-	it("places query params in params.query", () => {
-		const { content } = emitRestResolver(listPets);
+	it("places required query params in params.query", () => {
+		const { content } = emitRestResolver(listPetsByRequiredStatus);
 		assert.ok(content.includes('"status": ctx.args.status'));
 		assert.ok(content.includes("query: {"));
+		assert.ok(!content.includes("queryString(ctx)"));
+	});
+
+	it("keeps an optional param out of params.query", () => {
+		const { content } = emitRestResolver(listPets);
+		assert.ok(!content.includes("query: {"));
+		assert.ok(content.includes("resourcePath: `/pets${queryString(ctx)}`"));
 	});
 
 	it("keeps an exploded array param out of params.query", () => {
@@ -109,8 +123,10 @@ describe("emitRestResolver request rendering", () => {
 
 	it("joins a non-exploded array param into a single params.query value", () => {
 		const { content } = emitRestResolver(listPetsByCsvStatuses);
-		assert.ok(content.includes('"status": ctx.args.status?.join(",")'));
-		assert.ok(!content.includes("queryString(ctx)"));
+		assert.ok(
+			content.includes('append(parts, "status", ctx.args.status?.join(","))'),
+		);
+		assert.ok(!content.includes("query: {"));
 	});
 
 	it("appends the query string after interpolated path params", () => {
@@ -228,12 +244,12 @@ describe("emitRestResolver array query params", () => {
 		assert.equal(resourcePath, "/pets");
 	});
 
-	it("comma-joins a non-exploded array into params.query", () => {
+	it("comma-joins a non-exploded array into one query string pair", () => {
 		const { params, resourcePath } = evaluateRequest(listPetsByCsvStatuses, {
 			status: ["Available", "Pending"],
 		});
-		assert.equal(resourcePath, "/pets");
-		assert.deepEqual(params.query, { status: "Available,Pending" });
+		assert.equal(resourcePath, "/pets?status=Available%2CPending");
+		assert.equal(params.query, undefined);
 	});
 
 	it("never puts an array into params.query", () => {
@@ -243,6 +259,41 @@ describe("emitRestResolver array query params", () => {
 				assert.equal(typeof value, "string");
 			}
 		}
+	});
+});
+
+describe("emitRestResolver unset optional query params", () => {
+	it("drops an unset optional scalar instead of sending it", () => {
+		const request = evaluateRequest(listPets, {});
+		assert.equal(request.resourcePath, "/pets");
+		assert.equal(request.params.query, undefined);
+	});
+
+	it("drops an unset optional scalar next to a set one", () => {
+		const request = evaluateRequest(
+			{
+				...listPets,
+				queryParams: [
+					{ name: "from", optional: false, array: false, explode: true },
+					{ name: "status", optional: true, array: false, explode: true },
+				],
+			},
+			{ from: "2026-10-01" },
+		);
+		assert.equal(request.resourcePath, "/pets?from=2026-10-01");
+	});
+
+	it("sends a set optional scalar", () => {
+		const { resourcePath } = evaluateRequest(listPets, { status: "Sold" });
+		assert.equal(resourcePath, "/pets?status=Sold");
+	});
+
+	it("sends a required scalar in params.query", () => {
+		const { params, resourcePath } = evaluateRequest(listPetsByRequiredStatus, {
+			status: "Sold",
+		});
+		assert.equal(resourcePath, "/pets");
+		assert.deepEqual(params.query, { status: "Sold" });
 	});
 });
 

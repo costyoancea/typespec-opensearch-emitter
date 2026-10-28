@@ -8,18 +8,29 @@ const BASE_HEADERS = (ctx) => ({
 export function request(ctx) {
 	return {
 		method: "GET",
-		resourcePath: "/pets",
-		params: {
-			headers: BASE_HEADERS(ctx),
-			query: {
-				"status": ctx.args.status,
-			},
-		},
+		resourcePath: `/pets${queryString(ctx)}`,
+		params: { headers: BASE_HEADERS(ctx) },
 	};
 }
 
 export function response(ctx) {
 	return mapResponse(ctx);
+}
+
+function queryString(ctx) {
+	const parts = [];
+	append(parts, "status", ctx.args.status);
+	return parts.length === 0 ? "" : `?${parts.join("&")}`;
+}
+
+function append(parts, name, value) {
+	if (value === undefined || value === null) return;
+	parts.push(`${name}=${util.urlEncode(`${value}`)}`);
+}
+
+function appendEach(parts, name, values) {
+	if (values === undefined || values === null) return;
+	for (const value of values) append(parts, name, value);
 }
 
 function mapResponse(ctx) {
