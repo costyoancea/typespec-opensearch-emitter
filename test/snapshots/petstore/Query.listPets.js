@@ -28,11 +28,6 @@ function append(parts, name, value) {
 	parts.push(`${name}=${util.urlEncode(`${value}`)}`);
 }
 
-function appendEach(parts, name, values) {
-	if (values === undefined || values === null) return;
-	for (const value of values) append(parts, name, value);
-}
-
 function mapResponse(ctx) {
 	const { statusCode, body } = ctx.result;
 	const parsed = body ? JSON.parse(body) : null;
